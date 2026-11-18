@@ -9,6 +9,7 @@ from shared.observability import instrument
 
 from .db import Base, make_engine
 from .models import Reservation, Stock
+from .restocks import register as register_restocks
 from .schemas import ReservationIn, ReservationOut, StockIn, StockOut
 
 
@@ -143,4 +144,5 @@ def create_app(database_url: str | None = None) -> FastAPI:
             {"on_hand": Stock.on_hand - r.qty, "reserved": Stock.reserved - r.qty},
         )
 
+    register_restocks(app, SessionDep)
     return app
