@@ -46,7 +46,11 @@ def _transition(session: Session, r: Reservation, new_status: str, stock_values:
         .values(status=new_status)
     )
     if moved.rowcount == 0:
+        # concurrent duplicate transition won the flip: replay if it reached our target state
         session.rollback()
+        session.refresh(r)
+        if r.status == new_status:
+            return r
         raise HTTPException(409, "reservation is no longer active")
     session.execute(update(Stock).where(Stock.sku == r.sku).values(**stock_values))
     session.commit()

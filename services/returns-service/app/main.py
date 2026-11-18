@@ -141,7 +141,11 @@ def create_app(
             )
         )
         if moved.rowcount == 0:
+            # concurrent duplicate receive won the flip: replay its result
             session.rollback()
+            session.refresh(r)
+            if r.status in ("received", "refunded") and r.condition == body.condition:
+                return r
             raise HTTPException(409, "return is no longer approved")
         session.commit()
         session.refresh(r)
@@ -180,7 +184,11 @@ def create_app(
             .values(status="refunded", refund_cents=r.qty * r.unit_price_cents)
         )
         if moved.rowcount == 0:
+            # concurrent duplicate refund won the flip: replay its result
             session.rollback()
+            session.refresh(r)
+            if r.status == "refunded":
+                return r
             raise HTTPException(409, "return is no longer in received state")
         session.commit()
         session.refresh(r)

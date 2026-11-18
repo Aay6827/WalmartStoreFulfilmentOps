@@ -1,0 +1,126 @@
+# Local stack. Credentials are dev-only defaults; override with POSTGRES_PASSWORD.
+# Reset all data: docker compose down -v
+
+x-service: &service
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 5s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: walmart
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-walmart}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "127.0.0.1:32432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U walmart -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  inventory-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: inventory-service
+    image: walmart-fulfilment/inventory-service:dev
+    environment:
+      DATABASE_URL: postgresql+psycopg://walmart:${POSTGRES_PASSWORD:-walmart}@postgres:5432/inventory_db
+    ports:
+      - "127.0.0.1:32001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  slot-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: slot-service
+    image: walmart-fulfilment/slot-service:dev
+    environment:
+      DATABASE_URL: postgresql+psycopg://walmart:${POSTGRES_PASSWORD:-walmart}@postgres:5432/slots_db
+    ports:
+      - "127.0.0.1:32002:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  returns-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: returns-service
+    image: walmart-fulfilment/returns-service:dev
+    environment:
+      DATABASE_URL: postgresql+psycopg://walmart:${POSTGRES_PASSWORD:-walmart}@postgres:5432/returns_db
+      INVENTORY_URL: http://inventory-service:8000
+    ports:
+      - "127.0.0.1:32003:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+  order-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: order-service
+    image: walmart-fulfilment/order-service:dev
+    environment:
+      DATABASE_URL: postgresql+psycopg://walmart:${POSTGRES_PASSWORD:-walmart}@postgres:5432/orders_db
+      INVENTORY_URL: http://inventory-service:8000
+      SLOT_URL: http://slot-service:8000
+    ports:
+      - "127.0.0.1:32000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      slot-service:
+        condition: service_healthy
+
+  api-gateway:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: api-gateway
+    image: walmart-fulfilment/api-gateway:dev
+    environment:
+      ORDER_URL: http://order-service:8000
+      INVENTORY_URL: http://inventory-service:8000
+      SLOT_URL: http://slot-service:8000
+      RETURNS_URL: http://returns-service:8000
+      GATEWAY_DEADLINE_SECONDS: "2.0"
+    ports:
+      - "127.0.0.1:32004:8000"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      slot-service:
+        condition: service_healthy
+      returns-service:
+        condition: service_healthy
+
+volumes:
+  pgdata:
