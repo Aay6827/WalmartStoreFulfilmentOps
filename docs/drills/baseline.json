@@ -1,0 +1,167 @@
+{
+  "label": "baseline",
+  "config": {
+    "rate_per_s": 20.0,
+    "baseline_s": 30,
+    "outage_s": 120,
+    "recovery_s": 45,
+    "operator_delay_s": 20,
+    "client_max_attempts": 3,
+    "returns": 20
+  },
+  "events_s": {
+    "outage_start": 32.0,
+    "inventory_healthy": 157.1,
+    "operator_retry": 177.1,
+    "load_end": 202.1
+  },
+  "orders_created": 4042,
+  "orders_shed_by_client": 0,
+  "orders_replayed_after_recovery": 2641,
+  "phases": {
+    "baseline": {
+      "orders": {
+        "attempts": 660,
+        "ok_pct": 92.4,
+        "p50_ms": 63,
+        "p95_ms": 1359,
+        "max_ms": 2031,
+        "statuses": {
+          "200": 1,
+          "201": 609,
+          "503": 41,
+          "504": 9
+        }
+      },
+      "summary_reads": {
+        "attempts": 126,
+        "ok_pct": 100.0,
+        "p50_ms": 32,
+        "p95_ms": 750,
+        "max_ms": 2687,
+        "statuses": {
+          "200": 126
+        },
+        "degraded": 4
+      }
+    },
+    "outage": {
+      "orders": {
+        "attempts": 7505,
+        "ok_pct": 0.0,
+        "p50_ms": 15,
+        "p95_ms": 16,
+        "max_ms": 3265,
+        "statuses": {
+          "503": 7464,
+          "504": 41
+        }
+      },
+      "summary_reads": {
+        "attempts": 484,
+        "ok_pct": 0.2,
+        "p50_ms": 15,
+        "p95_ms": 31,
+        "max_ms": 3203,
+        "statuses": {
+          "200": 1,
+          "503": 481,
+          "504": 2
+        },
+        "degraded": 1
+      }
+    },
+    "recovery": {
+      "orders": {
+        "attempts": 3855,
+        "ok_pct": 89.0,
+        "p50_ms": 313,
+        "p95_ms": 531,
+        "max_ms": 1094,
+        "statuses": {
+          "200": 53,
+          "201": 3379,
+          "503": 423
+        }
+      },
+      "summary_reads": {
+        "attempts": 180,
+        "ok_pct": 87.8,
+        "p50_ms": 31,
+        "p95_ms": 140,
+        "max_ms": 375,
+        "statuses": {
+          "200": 158,
+          "503": 22
+        },
+        "degraded": 0
+      }
+    }
+  },
+  "returns_receive_during_outage": {
+    "attempts": 60,
+    "ok_pct": 0.0,
+    "p50_ms": 15,
+    "p95_ms": 2047,
+    "max_ms": 2063,
+    "statuses": {
+      "503": 52,
+      "504": 8
+    }
+  },
+  "admin_retry": {
+    "compensation": {
+      "attempted": 0,
+      "resolved": 0
+    },
+    "restock": {
+      "attempted": 8,
+      "resolved": 8
+    }
+  },
+  "breakers": {
+    "inventory_open_s_after_outage": 3.0,
+    "order_service_open_s_after_outage": 0.9,
+    "all_closed_s_after_inventory_healthy": null,
+    "first_successful_order_s_after_start_command": 12.1
+  },
+  "prometheus": {
+    "peak_error_ratio_5m": 0.906,
+    "peak_slow_ratio_5m": 0.036,
+    "peak_circuit_state": {
+      "order-service": 2.0,
+      "inventory-service": 2.0,
+      "slot-service": 0.0,
+      "returns-service": 2.0
+    },
+    "peak_returns_restock_pending": 8.0,
+    "peak_orders_compensating": 0.0,
+    "alerts_first_fired_s_after_outage": {
+      "CircuitOpen": 43.0,
+      "GatewayAvailabilityFastBurn": 68.0,
+      "ReturnsRestockBacklog": 133.0,
+      "ServiceDown": 38.0
+    }
+  },
+  "verification": {
+    "final_order_statuses": {
+      "confirmed": 4042
+    },
+    "stock": {
+      "sku": "DRILL-c4530b",
+      "on_hand": 1000000,
+      "reserved": 4042,
+      "available": 995958
+    },
+    "slot_booked": 4042,
+    "returns": {
+      "received/done": 20
+    },
+    "returns_stock": {
+      "sku": "DRILLRET-c4530b",
+      "on_hand": 1020,
+      "reserved": 0,
+      "available": 1020
+    }
+  }
+}
