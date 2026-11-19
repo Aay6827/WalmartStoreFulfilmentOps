@@ -1,0 +1,149 @@
+# Run with: promtool test rules infra/prometheus/tests/alerts.test.yml
+rule_files:
+  - ../rules/slo.rules.yml
+  - ../rules/service.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 1. Outage: 20% of gateway requests fail. /health traffic (all 200s) must NOT dilute the ratio:
+  #    if it did, the ratio would be ~1.8% and the page below would not fire.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="api-gateway",method="POST",path="/orders",status="201"}'
+        values: '0+80x420'
+      - series: 'http_requests_total{service="api-gateway",method="POST",path="/orders",status="503"}'
+        values: '0+20x420'
+      - series: 'http_requests_total{service="api-gateway",method="GET",path="/health",status="200"}'
+        values: '0+1000x420'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: GatewayAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: availability
+              window: fast
+            exp_annotations:
+              summary: "Gateway is burning its 99.5% availability error budget at 14.4x or faster, so the 30-day budget would be gone in about 2 days."
+      - eval_time: 75m
+        alertname: GatewayAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: availability
+              window: slow
+            exp_annotations:
+              summary: "Gateway is burning its 99.5% availability error budget at 6x or faster, so the 30-day budget would be gone in about 5 days."
+
+  # 2. Healthy: 0.1% errors is well inside the 0.5% budget, so nothing may fire.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="api-gateway",method="POST",path="/orders",status="201"}'
+        values: '0+999x420'
+      - series: 'http_requests_total{service="api-gateway",method="POST",path="/orders",status="503"}'
+        values: '0+1x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: GatewayAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: GatewayAvailabilitySlowBurn
+        exp_alerts: []
+
+  # 3. Slow burn only: 4% errors is above 6x (3%) but below 14.4x (7.2%): ticket, not page.
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="api-gateway",method="POST",path="/orders",status="201"}'
+        values: '0+96x420'
+      - series: 'http_requests_total{service="api-gateway",method="POST",path="/orders",status="503"}'
+        values: '0+4x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: GatewayAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: GatewayAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: availability
+              window: slow
+            exp_annotations:
+              summary: "Gateway is burning its 99.5% availability error budget at 6x or faster, so the 30-day budget would be gone in about 5 days."
+
+  # 4. Latency: every request is slower than 500 ms (the le="0.5" bucket never grows).
+  - interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{service="api-gateway",method="POST",path="/orders",le="0.5"}'
+        values: '0+0x420'
+      - series: 'http_request_duration_seconds_count{service="api-gateway",method="POST",path="/orders"}'
+        values: '0+100x420'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: GatewayLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              slo: latency
+              window: fast
+            exp_annotations:
+              summary: "Gateway latency SLO (95% of requests under 500 ms) is burning its error budget at 14.4x or faster."
+      - eval_time: 400m
+        alertname: GatewayLatencySlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              slo: latency
+              window: slow
+            exp_annotations:
+              summary: "Gateway latency SLO (95% of requests under 500 ms) is burning its error budget at 6x or faster."
+
+  # 5. Platform alerts: each metric flips to a bad value at minute 6.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="fulfilment",instance="inventory-service:8000"}'
+        values: '1x5 0x10'
+      - series: 'up{job="fulfilment",instance="order-service:8000"}'
+        values: '1x15'
+      - series: 'gateway_circuit_state{upstream="order-service"}'
+        values: '0x5 2x10'
+      - series: 'orders_compensating'
+        values: '0x5 3x10'
+      - series: 'returns_restock_pending'
+        values: '0x5 2x10'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: fulfilment
+              instance: "inventory-service:8000"
+            exp_annotations:
+              summary: "A fulfilment service has stopped answering Prometheus scrapes."
+      - eval_time: 12m
+        alertname: CircuitOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              upstream: order-service
+            exp_annotations:
+              summary: "The gateway has stopped sending traffic to an upstream because its circuit breaker is open."
+      - eval_time: 12m
+        alertname: OrdersStuckCompensating
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "Orders are waiting for their downstream undo to complete, so stock or delivery slots stay held. Run POST /orders/compensation-retry once the dependency is back."
+      - eval_time: 12m
+        alertname: ReturnsRestockBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Received returns have not been restocked yet because inventory-service was unreachable. Run POST /returns/restock-retry."
+      - eval_time: 4m
+        alertname: ServiceDown
+        exp_alerts: []

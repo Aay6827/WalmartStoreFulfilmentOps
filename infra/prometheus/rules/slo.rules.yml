@@ -1,0 +1,107 @@
+# Gateway SLOs
+#   availability: 99.5% of requests do not fail with a 5xx   (error budget 0.5%)
+#   latency:      95% of requests are answered in < 500 ms   (error budget 5%)
+# /health is excluded so container health checks cannot flatter the ratios.
+# Recording and alerting rules share ONE group on purpose: rules in a group run in order,
+# so the alerts always see the ratios recorded in the same evaluation.
+groups:
+  - name: gateway-slo
+    rules:
+      # ---- availability SLI: share of requests that failed with a 5xx ----
+      - record: gateway:error_ratio:rate5m
+        expr: |
+          (sum(rate(http_requests_total{service="api-gateway",path!="/health",status=~"5.."}[5m])) or vector(0))
+          / sum(rate(http_requests_total{service="api-gateway",path!="/health"}[5m]))
+      - record: gateway:error_ratio:rate30m
+        expr: |
+          (sum(rate(http_requests_total{service="api-gateway",path!="/health",status=~"5.."}[30m])) or vector(0))
+          / sum(rate(http_requests_total{service="api-gateway",path!="/health"}[30m]))
+      - record: gateway:error_ratio:rate1h
+        expr: |
+          (sum(rate(http_requests_total{service="api-gateway",path!="/health",status=~"5.."}[1h])) or vector(0))
+          / sum(rate(http_requests_total{service="api-gateway",path!="/health"}[1h]))
+      - record: gateway:error_ratio:rate6h
+        expr: |
+          (sum(rate(http_requests_total{service="api-gateway",path!="/health",status=~"5.."}[6h])) or vector(0))
+          / sum(rate(http_requests_total{service="api-gateway",path!="/health"}[6h]))
+
+      # ---- latency SLI: share of requests slower than 500 ms ----
+      - record: gateway:slow_ratio:rate5m
+        expr: |
+          1 - (
+            (sum(rate(http_request_duration_seconds_bucket{service="api-gateway",path!="/health",le="0.5"}[5m])) or vector(0))
+            / sum(rate(http_request_duration_seconds_count{service="api-gateway",path!="/health"}[5m]))
+          )
+      - record: gateway:slow_ratio:rate30m
+        expr: |
+          1 - (
+            (sum(rate(http_request_duration_seconds_bucket{service="api-gateway",path!="/health",le="0.5"}[30m])) or vector(0))
+            / sum(rate(http_request_duration_seconds_count{service="api-gateway",path!="/health"}[30m]))
+          )
+      - record: gateway:slow_ratio:rate1h
+        expr: |
+          1 - (
+            (sum(rate(http_request_duration_seconds_bucket{service="api-gateway",path!="/health",le="0.5"}[1h])) or vector(0))
+            / sum(rate(http_request_duration_seconds_count{service="api-gateway",path!="/health"}[1h]))
+          )
+      - record: gateway:slow_ratio:rate6h
+        expr: |
+          1 - (
+            (sum(rate(http_request_duration_seconds_bucket{service="api-gateway",path!="/health",le="0.5"}[6h])) or vector(0))
+            / sum(rate(http_request_duration_seconds_count{service="api-gateway",path!="/health"}[6h]))
+          )
+
+      # ---- multiwindow, multi-burn-rate alerts ----
+      # fast: 14.4x burn over 1h AND 5m  (2% of the 30-day budget per hour)  -> page
+      # slow:  6x   burn over 6h AND 30m (5% of the 30-day budget per 6h)    -> ticket
+      - alert: GatewayAvailabilityFastBurn
+        expr: |
+          gateway:error_ratio:rate1h > (14.4 * 0.005)
+          and
+          gateway:error_ratio:rate5m > (14.4 * 0.005)
+        for: 1m
+        labels:
+          severity: page
+          slo: availability
+          window: fast
+        annotations:
+          summary: "Gateway is burning its 99.5% availability error budget at 14.4x or faster, so the 30-day budget would be gone in about 2 days."
+
+      - alert: GatewayAvailabilitySlowBurn
+        expr: |
+          gateway:error_ratio:rate6h > (6 * 0.005)
+          and
+          gateway:error_ratio:rate30m > (6 * 0.005)
+        for: 5m
+        labels:
+          severity: ticket
+          slo: availability
+          window: slow
+        annotations:
+          summary: "Gateway is burning its 99.5% availability error budget at 6x or faster, so the 30-day budget would be gone in about 5 days."
+
+      - alert: GatewayLatencyFastBurn
+        expr: |
+          gateway:slow_ratio:rate1h > (14.4 * 0.05)
+          and
+          gateway:slow_ratio:rate5m > (14.4 * 0.05)
+        for: 1m
+        labels:
+          severity: page
+          slo: latency
+          window: fast
+        annotations:
+          summary: "Gateway latency SLO (95% of requests under 500 ms) is burning its error budget at 14.4x or faster."
+
+      - alert: GatewayLatencySlowBurn
+        expr: |
+          gateway:slow_ratio:rate6h > (6 * 0.05)
+          and
+          gateway:slow_ratio:rate30m > (6 * 0.05)
+        for: 5m
+        labels:
+          severity: ticket
+          slo: latency
+          window: slow
+        annotations:
+          summary: "Gateway latency SLO (95% of requests under 500 ms) is burning its error budget at 6x or faster."

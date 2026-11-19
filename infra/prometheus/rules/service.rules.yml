@@ -1,0 +1,34 @@
+groups:
+  - name: fulfilment-platform
+    rules:
+      - alert: ServiceDown
+        expr: up{job="fulfilment"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "A fulfilment service has stopped answering Prometheus scrapes."
+
+      - alert: CircuitOpen
+        expr: max by (upstream) (gateway_circuit_state) == 2
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "The gateway has stopped sending traffic to an upstream because its circuit breaker is open."
+
+      - alert: OrdersStuckCompensating
+        expr: max(orders_compensating) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Orders are waiting for their downstream undo to complete, so stock or delivery slots stay held. Run POST /orders/compensation-retry once the dependency is back."
+
+      - alert: ReturnsRestockBacklog
+        expr: max(returns_restock_pending) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Received returns have not been restocked yet because inventory-service was unreachable. Run POST /returns/restock-retry."
