@@ -4,7 +4,9 @@ Shows, with numbers:
   * how the platform behaves while a dependency is down (errors, latency, breakers, alerts)
   * that after recovery no order is lost or double-reserved and every return is restocked once
 
-Usage: python scripts/incident_drill.py --label baseline
+Usage:
+  python scripts/incident_drill.py --label baseline
+  python scripts/incident_drill.py --control --label control     (healthy-only control run)
 """
 import argparse
 import json
@@ -56,7 +58,8 @@ def record(st, kind, status, started, duration, degraded=False) -> None:
 # ---------------- client behaviour ----------------
 def place(client, st, oid: str) -> None:
     """Idempotent client: retries the SAME order id with backoff; gives up after max_attempts."""
-    body = {"order_id": oid, "sku": st.sku, "qty": 1, "slot_id": st.slot_id}
+    sku, slot_id = st.assign[oid]
+    body = {"order_id": oid, "sku": sku, "qty": 1, "slot_id": slot_id}
     for attempt in range(st.max_attempts):
         started = time.monotonic()
         status, data = 0, None
@@ -130,6 +133,7 @@ def run_load(st, client, rate: float) -> None:
         if not inflight.acquire(blocking=False):
             st.shed += 1  # the client itself is saturated: arrival never sent
             continue
+        st.assign[oid] = (random.choice(st.skus), random.choice(st.slots))
         st.outcomes[oid] = "unresolved"
         pool.submit(order_task, oid)
         if random.random() < 0.2 and inflight.acquire(blocking=False):
@@ -194,9 +198,9 @@ def first_state(timeline, upstream, state, after):
     return None
 
 
-def first_all_closed(timeline, after):
+def first_none_open(timeline, after):
     for t, circuits in timeline:
-        if t >= after and circuits and all(v == "closed" for v in circuits.values()):
+        if t >= after and circuits and "open" not in circuits.values():
             return t
     return None
 
@@ -244,15 +248,21 @@ def main() -> int:
     ap.add_argument("--operator-delay", type=int, default=20,
                     help="seconds after recovery before the operator runs the retry endpoints")
     ap.add_argument("--returns", type=int, default=20)
+    ap.add_argument("--skus", type=int, default=1, help="spread orders over this many SKUs")
+    ap.add_argument("--slots", type=int, default=1, help="spread orders over this many delivery slots")
+    ap.add_argument("--control", action="store_true", help="healthy-only run: no outage, no returns")
     args = ap.parse_args()
+    if args.control:
+        args.returns = 0
     args.recovery_seconds = max(args.recovery_seconds, args.operator_delay + 15)
 
     st = types.SimpleNamespace(
-        rid=uuid.uuid4().hex[:6], t0=time.monotonic(), rows=[], outcomes={}, confirmed=[],
+        rid=uuid.uuid4().hex[:6], t0=time.monotonic(), rows=[], outcomes={}, assign={}, confirmed=[],
         lock=threading.Lock(), stop=threading.Event(), max_attempts=3, shed=0, timeline=[],
-        return_ids=[])
-    st.sku, st.ret_sku = f"DRILL-{st.rid}", f"DRILLRET-{st.rid}"
-    st.slot_id = f"DRILLSLOT-{st.rid}"
+        return_ids=[], skus=[], slots=[])
+    st.skus = [f"DRILL-{st.rid}-{i}" for i in range(args.skus)]
+    st.slots = [f"DRILLSLOT-{st.rid}-{i}" for i in range(args.slots)]
+    st.ret_sku = f"DRILLRET-{st.rid}"
     failures: list[str] = []
     total = 0
 
@@ -268,21 +278,25 @@ def main() -> int:
 
     # ---- preflight and seed (direct to the services) ----
     health = client.get(f"{GATEWAY}/health").json()
-    if set(health["circuits"].values()) != {"closed"}:
-        print("preflight failed: not all circuit breakers are closed:", health["circuits"])
+    if "open" in health["circuits"].values():
+        print("preflight failed: a circuit breaker is open:", health["circuits"])
         return 2
-    assert client.put(f"{INVENTORY}/stock/{st.sku}", json={"on_hand": INITIAL_STOCK}).status_code == 200
-    assert client.put(f"{INVENTORY}/stock/{st.ret_sku}", json={"on_hand": RETURN_STOCK}).status_code == 200
-    assert client.post(f"{SLOTS}/slots", json={"slot_id": st.slot_id, "store_id": "ST-12", "kind": "pickup",
-                                               "starts_at": iso(days=1), "capacity": INITIAL_STOCK}).status_code == 201
-    for i in range(args.returns):
-        rid_ = f"DR-{st.rid}-{i}"
-        r = client.post(f"{GATEWAY}/returns", json={
-            "return_id": rid_, "order_id": f"DRO-{st.rid}-{i}", "sku": st.ret_sku, "qty": 1,
-            "unit_price_cents": 1000, "reason": "drill", "purchased_at": iso(days=-5)})
-        assert r.status_code == 201 and r.json()["status"] == "approved", r.text
-        st.return_ids.append(rid_)
-    log(f"seeded: sku={st.sku} slot={st.slot_id} returns={len(st.return_ids)}")
+    for sku in st.skus:
+        assert client.put(f"{INVENTORY}/stock/{sku}", json={"on_hand": INITIAL_STOCK}).status_code == 200
+    for slot in st.slots:
+        assert client.post(f"{SLOTS}/slots", json={"slot_id": slot, "store_id": "ST-12", "kind": "pickup",
+                                                   "starts_at": iso(days=1), "capacity": INITIAL_STOCK}).status_code == 201
+    if args.returns:
+        assert client.put(f"{INVENTORY}/stock/{st.ret_sku}", json={"on_hand": RETURN_STOCK}).status_code == 200
+        for i in range(args.returns):
+            rid_ = f"DR-{st.rid}-{i}"
+            r = client.post(f"{GATEWAY}/returns", json={
+                "return_id": rid_, "order_id": f"DRO-{st.rid}-{i}", "sku": st.ret_sku, "qty": 1,
+                "unit_price_cents": 1000, "reason": "drill", "purchased_at": iso(days=-5)})
+            assert r.status_code == 201 and r.json()["status"] == "approved", r.text
+            st.return_ids.append(rid_)
+    log(f"seeded: {len(st.skus)} sku(s), {len(st.slots)} slot(s), {len(st.return_ids)} returns"
+        + ("  [CONTROL RUN: no outage]" if args.control else ""))
 
     # ---- run ----
     st.t0 = time.monotonic()
@@ -295,38 +309,42 @@ def main() -> int:
     log(f"baseline traffic for {args.baseline_seconds}s at {args.rate:.0f} orders/s")
     time.sleep(args.baseline_seconds)
 
-    log("OUTAGE: stopping inventory-service")
-    stop_took = compose("stop", "inventory-service")
-    t_out = time.monotonic() - st.t0
-    wall_outage = time.time()
-    log(f"inventory-service is down (stop took {stop_took:.1f}s); receiving {len(st.return_ids)} returns")
-    time.sleep(5)
-    receive_returns(client, st)
-    remaining = args.outage_seconds - (time.monotonic() - st.t0 - t_out)
-    if remaining > 0:
-        time.sleep(remaining)
+    t_out = t_healthy = t_start_issued = t_operator = None
+    comp = rest = None
+    wall_outage = wall_start
+    if not args.control:
+        log("OUTAGE: stopping inventory-service")
+        stop_took = compose("stop", "inventory-service")
+        t_out = time.monotonic() - st.t0
+        wall_outage = time.time()
+        log(f"inventory-service is down (stop took {stop_took:.1f}s); receiving {len(st.return_ids)} returns")
+        time.sleep(5)
+        receive_returns(client, st)
+        remaining = args.outage_seconds - (time.monotonic() - st.t0 - t_out)
+        if remaining > 0:
+            time.sleep(remaining)
 
-    log("RECOVERY: starting inventory-service")
-    t_start_issued = time.monotonic() - st.t0
-    compose("start", "inventory-service")
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        try:
-            if httpx.get(f"{INVENTORY}/health", timeout=2.0).status_code == 200:
-                break
-        except httpx.HTTPError:
-            pass
-        time.sleep(0.5)
-    t_healthy = time.monotonic() - st.t0
-    log(f"inventory-service healthy {t_healthy - t_start_issued:.1f}s after start")
+        log("RECOVERY: starting inventory-service")
+        t_start_issued = time.monotonic() - st.t0
+        compose("start", "inventory-service")
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                if httpx.get(f"{INVENTORY}/health", timeout=2.0).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            time.sleep(0.5)
+        t_healthy = time.monotonic() - st.t0
+        log(f"inventory-service healthy {t_healthy - t_start_issued:.1f}s after start")
 
-    time.sleep(args.operator_delay)
-    log("OPERATOR: running the retry endpoints")
-    t_operator = time.monotonic() - st.t0
-    comp = client.post(f"{ORDERS}/orders/compensation-retry").json()
-    rest = client.post(f"{RETURNS}/returns/restock-retry").json()
-    log(f"compensation-retry={comp} restock-retry={rest}")
-    time.sleep(max(0, args.recovery_seconds - (time.monotonic() - st.t0 - t_healthy)))
+        time.sleep(args.operator_delay)
+        log("OPERATOR: running the retry endpoints")
+        t_operator = time.monotonic() - st.t0
+        comp = client.post(f"{ORDERS}/orders/compensation-retry").json()
+        rest = client.post(f"{RETURNS}/returns/restock-retry").json()
+        log(f"compensation-retry={comp} restock-retry={rest}")
+        time.sleep(max(0, args.recovery_seconds - (time.monotonic() - st.t0 - t_healthy)))
 
     log("stopping load and draining in-flight requests")
     st.stop.set()
@@ -343,10 +361,8 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(lambda o: place(client, st, o), unresolved))
 
-    not_received = []
-    for rid_ in st.return_ids:
-        if client.get(f"{RETURNS}/returns/{rid_}").json().get("status") != "received":
-            not_received.append(rid_)
+    not_received = [r_ for r_ in st.return_ids
+                    if client.get(f"{RETURNS}/returns/{r_}").json().get("status") != "received"]
     for rid_ in not_received:
         client.post(f"{RETURNS}/returns/{rid_}/receive", json={"condition": "resellable"})
     if not_received:
@@ -363,24 +379,33 @@ def main() -> int:
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         finals = Counter(pool.map(final_status, all_oids))
-    stock = client.get(f"{INVENTORY}/stock/{st.sku}").json()
-    slot = client.get(f"{SLOTS}/slots/{st.slot_id}").json()
+    reserved_total = on_hand_total = 0
+    for sku in st.skus:
+        d = client.get(f"{INVENTORY}/stock/{sku}").json()
+        reserved_total += d["reserved"]
+        on_hand_total += d["on_hand"]
+    booked_total = sum(client.get(f"{SLOTS}/slots/{s}").json()["booked"] for s in st.slots)
     ret_states = Counter()
     for rid_ in st.return_ids:
         d = client.get(f"{RETURNS}/returns/{rid_}").json()
         ret_states[(d["status"], d["restock_status"])] += 1
-    ret_stock = client.get(f"{INVENTORY}/stock/{st.ret_sku}").json()
+    ret_stock = client.get(f"{INVENTORY}/stock/{st.ret_sku}").json() if st.return_ids else None
 
     # ---- findings ----
     rows = st.rows
-    phases = {"baseline": (0, t_out), "outage": (t_out, t_healthy), "recovery": (t_healthy, 1e9)}
+    if args.control:
+        phases = {"baseline": (0, 1e9)}
+    else:
+        phases = {"baseline": (0, t_out), "outage": (t_out, t_healthy), "recovery": (t_healthy, 1e9)}
     report = {
         "label": args.label,
-        "config": {"rate_per_s": args.rate, "baseline_s": args.baseline_seconds, "outage_s": args.outage_seconds,
+        "config": {"control": args.control, "rate_per_s": args.rate, "baseline_s": args.baseline_seconds,
+                   "outage_s": None if args.control else args.outage_seconds,
                    "recovery_s": args.recovery_seconds, "operator_delay_s": args.operator_delay,
-                   "client_max_attempts": 3, "returns": len(st.return_ids)},
-        "events_s": {"outage_start": round(t_out, 1), "inventory_healthy": round(t_healthy, 1),
-                     "operator_retry": round(t_operator, 1), "load_end": round(t_load_end, 1)},
+                   "client_max_attempts": 3, "returns": len(st.return_ids),
+                   "skus": len(st.skus), "slots": len(st.slots)},
+        "events_s": {"outage_start": t_out and round(t_out, 1), "inventory_healthy": t_healthy and round(t_healthy, 1),
+                     "operator_retry": t_operator and round(t_operator, 1), "load_end": round(t_load_end, 1)},
         "orders_created": len(all_oids), "orders_shed_by_client": st.shed,
         "orders_replayed_after_recovery": len(unresolved),
         "phases": {name: {"orders": stats(rows, "order", lo, hi), "summary_reads": stats(rows, "summary", lo, hi)}
@@ -388,30 +413,37 @@ def main() -> int:
         "returns_receive_during_outage": stats(rows, "receive", 0, 1e9),
         "admin_retry": {"compensation": comp, "restock": rest},
     }
-    open_inv = first_state(st.timeline, "inventory-service", "open", t_out)
-    open_ord = first_state(st.timeline, "order-service", "open", t_out)
-    closed = first_all_closed(st.timeline, t_healthy)
-    first_ok = next((r["t"] for r in rows if r["kind"] == "order" and r["status"] in (200, 201)
-                     and r["t"] >= t_start_issued), None)
-    report["breakers"] = {
-        "inventory_open_s_after_outage": None if open_inv is None else round(open_inv - t_out, 1),
-        "order_service_open_s_after_outage": None if open_ord is None else round(open_ord - t_out, 1),
-        "all_closed_s_after_inventory_healthy": None if closed is None else round(closed - t_healthy, 1),
-        "first_successful_order_s_after_start_command": None if first_ok is None else round(first_ok - t_start_issued, 1),
-    }
+    if not args.control:
+        open_inv = first_state(st.timeline, "inventory-service", "open", t_out)
+        open_ord = first_state(st.timeline, "order-service", "open", t_out)
+        open_ret = first_state(st.timeline, "returns-service", "open", t_out)
+        none_open = first_none_open(st.timeline, t_healthy)
+        first_ok = next((r["t"] for r in rows if r["kind"] == "order" and r["status"] in (200, 201)
+                         and r["t"] >= t_start_issued), None)
+
+        def rel(x, base):
+            return None if x is None else round(x - base, 1)
+
+        report["breakers"] = {
+            "inventory_open_s_after_outage": rel(open_inv, t_out),
+            "order_service_open_s_after_outage": rel(open_ord, t_out),
+            "returns_service_open_s_after_outage": rel(open_ret, t_out),
+            "no_breaker_open_s_after_inventory_healthy": rel(none_open, t_healthy),
+            "first_successful_order_s_after_start_command": rel(first_ok, t_start_issued),
+        }
     report["prometheus"] = prom_findings(client, wall_start, wall_outage, wall_end)
     report["verification"] = {
-        "final_order_statuses": dict(finals), "stock": stock, "slot_booked": slot["booked"],
+        "final_order_statuses": dict(finals), "reserved_total": reserved_total, "on_hand_total": on_hand_total,
+        "slot_booked_total": booked_total,
         "returns": {f"{s}/{r}": n for (s, r), n in ret_states.items()}, "returns_stock": ret_stock,
     }
 
     print("\n==================== FINDINGS ====================")
-    for name, (lo, hi) in phases.items():
-        o = report["phases"][name]["orders"]
-        print(f"{name:9s} POST /orders  {o}")
+    for name in phases:
+        print(f"{name:9s} POST /orders  {report['phases'][name]['orders']}")
         print(f"{'':9s} GET summary   {report['phases'][name]['summary_reads']}")
     print(f"returns receive during outage: {report['returns_receive_during_outage']}")
-    print(f"breakers:   {report['breakers']}")
+    print(f"breakers:   {report.get('breakers')}")
     print(f"prometheus: {report['prometheus']}")
     print(f"orders created={len(all_oids)} shed_by_client={st.shed} replayed_after_recovery={len(unresolved)}")
 
@@ -422,13 +454,14 @@ def main() -> int:
     check("no order lost: every created order is confirmed", confirmed == len(all_oids),
           (confirmed, len(all_oids)))
     check("inventory reserved == confirmed orders (no double reservation, none leaked)",
-          stock["reserved"] == confirmed, (stock["reserved"], confirmed))
-    check("inventory on_hand unchanged", stock["on_hand"] == INITIAL_STOCK, stock)
-    check("slot booked == confirmed orders", slot["booked"] == confirmed, (slot["booked"], confirmed))
-    check("all returns received and restocked", dict(ret_states) == {("received", "done"): len(st.return_ids)},
-          dict(ret_states))
-    check("returns restocked exactly once (on_hand = stock + returns)",
-          ret_stock["on_hand"] == RETURN_STOCK + len(st.return_ids), ret_stock)
+          reserved_total == confirmed, (reserved_total, confirmed))
+    check("inventory on_hand unchanged", on_hand_total == INITIAL_STOCK * len(st.skus), on_hand_total)
+    check("slot booked == confirmed orders", booked_total == confirmed, (booked_total, confirmed))
+    if st.return_ids:
+        check("all returns received and restocked",
+              dict(ret_states) == {("received", "done"): len(st.return_ids)}, dict(ret_states))
+        check("returns restocked exactly once (on_hand = stock + returns)",
+              ret_stock["on_hand"] == RETURN_STOCK + len(st.return_ids), ret_stock)
 
     out = ROOT / "docs" / "drills"
     out.mkdir(parents=True, exist_ok=True)

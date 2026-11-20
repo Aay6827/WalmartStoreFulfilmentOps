@@ -59,22 +59,27 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at = 0.0
         self._probing = False
-        CIRCUIT_STATE.labels(name).set(_STATE_VALUE[CLOSED])
+        # Evaluated at scrape time, so the gauge also reflects a cool-down that expired on an
+        # upstream that receives no traffic (nothing else would ever move it out of "open").
+        CIRCUIT_STATE.labels(name).set_function(lambda: _STATE_VALUE[self.effective_state()])
+
+    def effective_state(self) -> str:
+        """What the next caller would observe. An open breaker whose cool-down has elapsed is
+        half-open: the next request is admitted as the probe."""
+        with self._lock:
+            if self._state == OPEN and self._clock() - self._opened_at >= self._reset_timeout:
+                return HALF_OPEN
+            return self._state
 
     @property
     def state(self) -> str:
-        with self._lock:
-            return self._state
-
-    def _set(self, state: str) -> None:
-        self._state = state
-        CIRCUIT_STATE.labels(self.name).set(_STATE_VALUE[state])
+        return self.effective_state()
 
     def _trip(self) -> None:
         self._opened_at = self._clock()
         self._failures = 0
         self._probing = False
-        self._set(OPEN)
+        self._state = OPEN
 
     def retry_after(self) -> float:
         with self._lock:
@@ -89,7 +94,7 @@ class CircuitBreaker:
             if self._state == OPEN:
                 if self._clock() - self._opened_at < self._reset_timeout:
                     return False
-                self._set(HALF_OPEN)
+                self._state = HALF_OPEN
                 self._probing = True
                 return True
             if self._probing:  # half-open: exactly one probe at a time
@@ -104,7 +109,7 @@ class CircuitBreaker:
             self._failures = 0
             self._probing = False
             if self._state == HALF_OPEN:
-                self._set(CLOSED)
+                self._state = CLOSED
 
     def record_failure(self) -> None:
         with self._lock:

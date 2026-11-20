@@ -1,0 +1,79 @@
+{
+  "label": "control",
+  "config": {
+    "control": true,
+    "rate_per_s": 20.0,
+    "baseline_s": 60,
+    "outage_s": null,
+    "recovery_s": 45,
+    "operator_delay_s": 20,
+    "client_max_attempts": 3,
+    "returns": 0,
+    "skus": 1,
+    "slots": 1
+  },
+  "events_s": {
+    "outage_start": null,
+    "inventory_healthy": null,
+    "operator_retry": null,
+    "load_end": 60.1
+  },
+  "orders_created": 1201,
+  "orders_shed_by_client": 0,
+  "orders_replayed_after_recovery": 0,
+  "phases": {
+    "baseline": {
+      "orders": {
+        "attempts": 1201,
+        "ok_pct": 100.0,
+        "p50_ms": 62,
+        "p95_ms": 187,
+        "max_ms": 500,
+        "statuses": {
+          "201": 1201
+        }
+      },
+      "summary_reads": {
+        "attempts": 236,
+        "ok_pct": 100.0,
+        "p50_ms": 31,
+        "p95_ms": 109,
+        "max_ms": 219,
+        "statuses": {
+          "200": 236
+        },
+        "degraded": 0
+      }
+    }
+  },
+  "returns_receive_during_outage": {
+    "attempts": 0
+  },
+  "admin_retry": {
+    "compensation": null,
+    "restock": null
+  },
+  "prometheus": {
+    "peak_error_ratio_5m": 0.0,
+    "peak_slow_ratio_5m": 0.0,
+    "peak_circuit_state": {
+      "order-service": 0.0,
+      "inventory-service": 0.0,
+      "slot-service": 0.0,
+      "returns-service": 0.0
+    },
+    "peak_returns_restock_pending": 0.0,
+    "peak_orders_compensating": 0.0,
+    "alerts_first_fired_s_after_outage": {}
+  },
+  "verification": {
+    "final_order_statuses": {
+      "confirmed": 1201
+    },
+    "reserved_total": 1201,
+    "on_hand_total": 1000000,
+    "slot_booked_total": 1201,
+    "returns": {},
+    "returns_stock": null
+  }
+}

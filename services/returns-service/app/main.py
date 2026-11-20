@@ -7,13 +7,16 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from prometheus_client import Gauge
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from shared.observability import instrument
 
 from .db import Base, make_engine
 from .models import Return
 from .schemas import ReceiveIn, ReturnIn, ReturnOut
+
+DOWNSTREAM_TIMEOUT = float(os.getenv("DOWNSTREAM_TIMEOUT_SECONDS", "0.5"))  # must stay below the gateway deadline: see docs/timeout-budget.md
+
 
 RESTOCK_PENDING = Gauge(
     "returns_restock_pending",
@@ -38,9 +41,13 @@ def _refresh_gauge(session: Session) -> None:
 
 def _try_restock(client: httpx.Client, r: Return) -> str:
     """Returns the new restock_status: done / pending (retryable) / failed (permanent)."""
+    payload = {"return_id": r.return_id, "sku": r.sku, "qty": r.qty}
+    session = object_session(r)
+    if session is not None:
+        session.commit()  # release the DB connection before the remote call
     try:
         resp = client.post(
-            "/restocks", json={"return_id": r.return_id, "sku": r.sku, "qty": r.qty}
+            "/restocks", json=payload
         )
     except httpx.HTTPError:
         return "pending"
@@ -76,7 +83,7 @@ def create_app(
     app.state.engine = engine
     app.state.inventory = inventory_client or httpx.Client(
         base_url=os.getenv("INVENTORY_URL", "http://localhost:32001"),
-        timeout=httpx.Timeout(2.0),
+        timeout=httpx.Timeout(DOWNSTREAM_TIMEOUT),
     )
     window = window_days or int(os.getenv("RETURN_WINDOW_DAYS", "90"))
     instrument(app, "returns-service")

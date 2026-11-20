@@ -14,6 +14,9 @@ from .db import Base, make_engine
 from .models import Order
 from .schemas import OrderIn, OrderOut
 
+DOWNSTREAM_TIMEOUT = float(os.getenv("DOWNSTREAM_TIMEOUT_SECONDS", "0.5"))  # must stay below the gateway deadline: see docs/timeout-budget.md
+
+
 COMPENSATING = Gauge(
     "orders_compensating", "Orders whose downstream undo has not completed yet"
 )
@@ -67,6 +70,7 @@ def _refresh_gauge(session: Session) -> None:
 
 def _compensate(app: FastAPI, session: Session, order_id: str, sku: str, to_status: str) -> bool:
     """Undo downstream effects. Both calls are idempotent and 404 means nothing to undo."""
+    session.commit()  # release the DB connection before the remote calls
     try:
         released = _post(app.state.inventory, f"/reservations/{order_id}/{sku}/release")
         unbooked = _post(app.state.slots, f"/bookings/{order_id}/cancel")
@@ -94,6 +98,7 @@ def _reject(app: FastAPI, session: Session, order_id: str, sku: str, reason: str
 
 def _run_saga(app: FastAPI, session: Session, order: Order) -> None:
     oid, sku, qty, slot_id = order.order_id, order.sku, order.qty, order.slot_id
+    session.commit()  # end the read transaction: never hold a DB connection across remote calls
     try:
         reserved = _post(app.state.inventory, "/reservations", {"order_id": oid, "sku": sku, "qty": qty})
         if reserved.status_code not in (200, 201):
@@ -136,10 +141,10 @@ def create_app(
     Base.metadata.create_all(engine)
     app.state.engine = engine
     app.state.inventory = inventory_client or httpx.Client(
-        base_url=os.getenv("INVENTORY_URL", "http://localhost:32001"), timeout=httpx.Timeout(2.0)
+        base_url=os.getenv("INVENTORY_URL", "http://localhost:32001"), timeout=httpx.Timeout(DOWNSTREAM_TIMEOUT)
     )
     app.state.slots = slot_client or httpx.Client(
-        base_url=os.getenv("SLOT_URL", "http://localhost:32002"), timeout=httpx.Timeout(2.0)
+        base_url=os.getenv("SLOT_URL", "http://localhost:32002"), timeout=httpx.Timeout(DOWNSTREAM_TIMEOUT)
     )
     instrument(app, "order-service")
 
@@ -231,8 +236,10 @@ def create_app(
             session.refresh(order)
         if order.status != "fulfilling":
             raise HTTPException(409, f"cannot fulfil a {order.status} order")
+        sku = order.sku
+        session.commit()  # release the DB connection before the commit call
         try:
-            resp = _post(app.state.inventory, f"/reservations/{order_id}/{order.sku}/commit")
+            resp = _post(app.state.inventory, f"/reservations/{order_id}/{sku}/commit")
         except Transient:
             raise HTTPException(503, "inventory unavailable; order stays fulfilling, retry")
         if resp.status_code != 200:
